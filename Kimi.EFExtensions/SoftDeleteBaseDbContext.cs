@@ -95,9 +95,7 @@ namespace Kimi.EFExtensions
                     entry.Entity.Updated = DateTime.UtcNow;
                     entry.Entity.Updatedby = userName;
                 }
-                else if ((entry.State == EntityState.Modified || entry.State == EntityState.Added) &&
-                    entry.Properties.Any(p => p.IsModified
-                    && !p.Metadata.Name.Equals(nameof(ISoftDeleteEntity.Updated), StringComparison.CurrentCultureIgnoreCase)))
+                else if ((entry.State == EntityState.Modified || entry.State == EntityState.Added))
                 {
                     entry.Entity.Active = true;
                     entry.Entity.Updated = DateTime.UtcNow;
