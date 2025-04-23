@@ -3,11 +3,11 @@
 // Created          : 01/13/2025
 // ***********************************************************************
 
+using Kimi.EFExtensions.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace Kimi.EFExtensions
 {
-
     /// <summary>
     /// Represents the database context for MlxBase.
     /// </summary>
@@ -18,38 +18,39 @@ namespace Kimi.EFExtensions
         /// <summary>
         /// Initializes a new instance of the <see cref="SoftDeleteBaseDbContext"/> class.
         /// </summary>
-        public SoftDeleteBaseDbContext()
-        {
-        }
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SoftDeleteBaseDbContext"/> class.
-        /// </summary>
         /// <param name="options">The options<see cref="DbContextOptions"/>.</param>
         public SoftDeleteBaseDbContext(DbContextOptions options) : base(options)
         {
         }
 
+        #endregion
+
+        #region Methods
+
         /// <summary>
+        /// The DbContextBaseSaveChangesAsync.
         /// </summary>
-        /// <remarks>
-        /// <para>
-        /// <strong>Warning:</strong> This method is not supported. Please use <c>SaveChangesAsync(userName)</c> instead.
-        /// </para>
-        /// </remarks>
+        /// <param name="cancellationToken">The cancellationToken<see cref="CancellationToken"/>.</param>
+        /// <returns>The <see cref="int"/>.</returns>
+        protected async Task<int> DbContextBaseSaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// The SaveChanges.
+        /// </summary>
+        /// <returns>The <see cref="int"/>.</returns>
         public override int SaveChanges()
         {
             throw new NotSupportedException("Please use await SaveChangesAsync(userName)");
         }
 
         /// <summary>
+        /// The SaveChangesAsync.
         /// </summary>
         /// <param name="cancellationToken">The cancellation token.</param>
-        /// <remarks>
-        /// <para>
-        /// <strong>Warning:</strong> This method is not supported. Please use <c>SaveChangesAsync(userName)</c> instead.
-        /// </para>
-        /// </remarks>
+        /// <returns>The <see cref="int"/>.</returns>
         public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
             throw new NotSupportedException("Please use await SaveChangesAsync(userName)");
@@ -94,7 +95,9 @@ namespace Kimi.EFExtensions
                     entry.Entity.Updated = DateTime.UtcNow;
                     entry.Entity.Updatedby = userName;
                 }
-                else if (entry.State == EntityState.Modified || entry.State == EntityState.Added)
+                else if ((entry.State == EntityState.Modified || entry.State == EntityState.Added) &&
+                    entry.Properties.Any(p => p.IsModified
+                    && !p.Metadata.Name.Equals(nameof(ISoftDeleteEntity.Updated), StringComparison.CurrentCultureIgnoreCase)))
                 {
                     entry.Entity.Active = true;
                     entry.Entity.Updated = DateTime.UtcNow;

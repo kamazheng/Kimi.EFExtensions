@@ -3,7 +3,7 @@
 // Created          : 03/17/2025
 // ***********************************************************************
 
-namespace Kimi.EFExtensions.Auditing;
+namespace Kimi.EFExtensions.Interfaces;
 
 public interface IAuditableEntity
 {

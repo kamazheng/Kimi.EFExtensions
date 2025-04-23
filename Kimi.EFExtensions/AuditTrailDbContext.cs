@@ -4,6 +4,7 @@
 // ***********************************************************************
 
 using Kimi.EFExtensions.Auditing;
+using Kimi.EFExtensions.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace Kimi.EFExtensions
@@ -27,10 +28,9 @@ namespace Kimi.EFExtensions
         /// <summary>
         /// Initializes a new instance of the <see cref="AuditTrailDbContext"/> class.
         /// </summary>
-        public AuditTrailDbContext() : base()
+        public AuditTrailDbContext(DbContextOptions options) : base(options)
         {
         }
-
         #endregion
 
         #region Properties
@@ -52,18 +52,29 @@ namespace Kimi.EFExtensions
             ChangeTracker.DetectChanges();
             SoftDelete(userName);
             var auditEntries = HandleAuditingBeforeSaveChanges(userName);
-            int result = await base.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await HandleAuditingAfterSaveChangesAsync(auditEntries, cancellationToken);
+            int result = await base.DbContextBaseSaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await HandleAuditingAfterSaveChangesAsync(userName, auditEntries, cancellationToken);
             return result;
+        }
+
+        /// <summary>
+        /// The SaveChangesAsync.
+        /// </summary>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The <see cref="int"/>.</returns>
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException("Please use await SaveChangesAsync(userName)");
         }
 
         /// <summary>
         /// The HandleAuditingAfterSaveChangesAsync.
         /// </summary>
+        /// <param name="userName"></param>
         /// <param name="trailEntries">The trailEntries<see cref="List{AuditTrail}"/>.</param>
         /// <param name="cancellationToken">The cancellationToken<see cref="CancellationToken"/>.</param>
         /// <returns>The <see cref="Task"/>.</returns>
-        private Task HandleAuditingAfterSaveChangesAsync(List<AuditTrail> trailEntries, CancellationToken cancellationToken = new())
+        private Task HandleAuditingAfterSaveChangesAsync(string userName, List<AuditTrail> trailEntries, CancellationToken cancellationToken = new())
         {
             if (trailEntries == null || trailEntries.Count == 0)
             {
@@ -87,21 +98,21 @@ namespace Kimi.EFExtensions
                 AuditTrails.Add(entry.ToAuditTrail());
             }
             //Important to call base method, otherwise, will trigger again.
-            return base.SaveChangesAsync(cancellationToken);
+            return base.SaveChangesAsync(userName, cancellationToken);
         }
 
         /// <summary>
         /// The HandleAuditingBeforeSaveChanges.
         /// </summary>
-        /// <param name="userId">The userId<see cref="string"/>.</param>
+        /// <param name="userName">The userId<see cref="string"/>.</param>
         /// <returns>The <see cref="List{AuditTrail}"/>.</returns>
-        private List<AuditTrail> HandleAuditingBeforeSaveChanges(string userId)
+        private List<AuditTrail> HandleAuditingBeforeSaveChanges(string userName)
         {
             foreach (var entry in ChangeTracker.Entries<IAuditableEntity>().ToList())
             {
                 if (entry.State == EntityState.Added)
                 {
-                    entry.Entity.CreatedBy = userId;
+                    entry.Entity.CreatedBy = userName;
                     entry.Entity.CreatedOn = DateTime.UtcNow;
                 }
                 else if (entry.State == EntityState.Modified)
@@ -128,7 +139,7 @@ namespace Kimi.EFExtensions
                 var trailEntry = new AuditTrail(entry)
                 {
                     TableName = tableName,
-                    UserId = userId
+                    UserId = userName
                 };
                 trailEntries.Add(trailEntry);
                 foreach (var property in entry.Properties)
@@ -164,14 +175,14 @@ namespace Kimi.EFExtensions
                                 property.CurrentValue = property.OriginalValue;
                             }
                             if (property.IsModified && entry.Entity is ISoftDeleteEntity
-                                && propertyName == nameof(ISoftDeleteEntity.Active) && Convert.ToBoolean(property.CurrentValue) == false)
+                                && propertyName == nameof(ISoftDeleteEntity.Active) && !Convert.ToBoolean(property.CurrentValue))
                             {
                                 trailEntry.ChangedColumns.Add(propertyName);
                                 trailEntry.TrailType = TrailType.Delete;
                                 trailEntry.OldValues[propertyName] = property.OriginalValue;
                                 trailEntry.NewValues[propertyName] = property.CurrentValue;
                             }
-                            else if (property.IsModified && property.OriginalValue?.Equals(property.CurrentValue) == false)
+                            else if (property.IsModified && property.OriginalValue?.Equals(property.CurrentValue) != true)
                             {
                                 trailEntry.ChangedColumns.Add(propertyName);
                                 if (trailEntry.TrailType == default) trailEntry.TrailType = TrailType.Update;

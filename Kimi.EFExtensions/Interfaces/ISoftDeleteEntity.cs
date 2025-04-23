@@ -3,7 +3,7 @@
 // Created          : 01/13/2025
 // ***********************************************************************
 
-namespace Kimi.EFExtensions
+namespace Kimi.EFExtensions.Interfaces
 {
     public interface ISoftDeleteEntity
     {
