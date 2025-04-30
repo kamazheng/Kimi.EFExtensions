@@ -1,9 +1,4 @@
 ﻿// ***********************************************************************
-// <copyright file="EqualityHelper.cs" company="Molex(Chengdu)">
-//     Copyright © Molex(Chengdu) 2025
-// </copyright>
-// ***********************************************************************
-// Author           : MOLEX\kzheng
 // Created          : 04/22/2025
 // Last Modified    : 04/22/2025
 // Description      : Provides utility methods for deep equality comparison of objects,
