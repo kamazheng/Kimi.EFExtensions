@@ -1,4 +1,4 @@
-﻿// ***********************************************************************
+// ***********************************************************************
 // Author           : kama zheng
 // Created          : 03/18/2025
 // ***********************************************************************
@@ -19,6 +19,9 @@ public static class DynamicQuery
         if (ientityType == null) return string.Empty;
         var schema = ientityType.GetSchema();
         var tableName = ientityType.GetTableName();
+        // If using SQLite, do not include schema
+        if (dbContext.Database.ProviderName?.ToLower().Contains("sqlite") == true)
+            return $"[{tableName}]";
         return $"[{schema}].[{tableName}]";
     }
 
@@ -146,7 +149,7 @@ public static class DynamicQuery
         var entityType = dbContext.Model.FindEntityType(tableType.FullName ?? throw new InvalidOperationException("Table type must have a full name."));
         if (entityType == null) throw new InvalidOperationException($"Entity type '{tableType.FullName}' not found in the DbContext model.");
 
-        var schemaName = entityType.GetSchema() ?? "dbo";
+        var schemaName = entityType.GetSchema();
         var tableName = entityType.GetTableName() ?? throw new InvalidOperationException("Table name not found for the entity type.");
 
         // Cache property-to-column mapping
@@ -183,7 +186,11 @@ public static class DynamicQuery
         var queryBuilder = new StringBuilder();
         var quotedColumns = propertyToColumnMap.Select(p => $"[{p.Key}]"); // Quote column names
         var columns = string.Join(", ", quotedColumns); // Explicitly specify columns
-        queryBuilder.Append($"SELECT {columns} FROM [{schemaName}].[{tableName}]");
+        // If using SQLite, do not include schema in table name
+        if (dbContext.Database.ProviderName?.ToLower().Contains("sqlite") == true)
+            queryBuilder.Append($"SELECT {columns} FROM [{tableName}]");
+        else
+            queryBuilder.Append($"SELECT {columns} FROM [{schemaName}].[{tableName}]");
 
         // Handle WHERE clause with parameterization
         var parameters = new Dictionary<string, object>();
@@ -196,9 +203,13 @@ public static class DynamicQuery
         // Handle ORDER BY clause
         queryBuilder.Append($" ORDER BY {orderByColumn}");
 
-        // Handle pagination
+        // Handle pagination (SQLite requires LIMIT with OFFSET)
         int offset = (page - 1) * topQty;
-        queryBuilder.Append($" OFFSET {offset} ROWS FETCH NEXT {topQty} ROWS ONLY");
+        if (offset > 0 || topQty > 0)
+        {
+            // Use LIMIT and OFFSET for SQLite compatibility
+            queryBuilder.Append($" LIMIT {topQty} OFFSET {offset}");
+        }
 
         var query = queryBuilder.ToString();
         query = ReplaceEscapedFieldNamesWithColumnNames(query, propertyToColumnMap);
@@ -376,5 +387,194 @@ public static class DynamicQuery
             }
         }
         return sqlQuery;
+    }
+
+
+    /// <summary>
+    /// 向数据库中插入或更新一条记录。
+    /// </summary>
+    /// <param name="dbContext">数据库上下文实例。</param>
+    /// <param name="tableTypeName">实体类型的名称。</param>
+    /// <param name="jsonObject">包含实体数据的 JSON 字符串。</param>
+    /// <param name="byUser">执行操作的用户名（可选）。</param>
+    /// <returns>插入或更新后的实体对象。</returns>
+    /// <exception cref="ArgumentNullException">当 <paramref name="dbContext"/> 为 null 时抛出。</exception>
+    /// <exception cref="ArgumentException">当 <paramref name="tableTypeName"/> 或 <paramref name="jsonObject"/> 为空或无效时抛出。</exception>
+    /// <exception cref="InvalidOperationException">当反序列化失败、未找到主键或主键属性无效时抛出。</exception>
+    /// <remarks>
+    /// 1. 根据 <paramref name="tableTypeName"/> 获取实体类型。
+    /// 2. 将 <paramref name="jsonObject"/> 反序列化为实体对象。
+    /// 3. 检查主键是否存在，并处理自增主键的逻辑。
+    /// 4. 判断记录是否存在：
+    ///    - 若不存在，插入新记录（跳过导航属性）。
+    ///    - 若存在，更新记录（跳过导航属性）。
+    /// 5. 调用 <see cref="DbContext.SaveChangesAsync(System.Threading.CancellationToken)"/> 
+    /// 或 <see cref="Kimi.EFExtensions.SoftDeleteBaseDbContext.SaveChangesAsync(string,CancellationToken)"/> 保存更改。
+    /// </remarks>
+    public static async Task<object?> UpsertRecord(
+                this DbContext dbContext,
+                string tableTypeName,
+        string jsonObject,
+        string? byUser)
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        if (string.IsNullOrWhiteSpace(tableTypeName)) throw new ArgumentException("Table type name cannot be null or empty.", nameof(tableTypeName));
+        if (string.IsNullOrWhiteSpace(jsonObject)) throw new ArgumentException("JSON object cannot be null or empty.", nameof(jsonObject));
+
+        // 1. 获取实体类型
+        var entityType = dbContext.GetEntityTypeByName(tableTypeName);
+
+        // 2. 反序列化 JSON 为实体对象
+        var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var entity = System.Text.Json.JsonSerializer.Deserialize(jsonObject, entityType, options)
+            ?? throw new InvalidOperationException("Failed to deserialize JSON to entity.");
+
+        // 3. 获取主键属性
+        var efEntityType = dbContext.Model.FindEntityType(entityType);
+        var primaryKey = efEntityType?.FindPrimaryKey();
+        if (primaryKey == null || primaryKey.Properties.Count == 0)
+            throw new InvalidOperationException($"No primary key found for entity type '{tableTypeName}'.");
+
+        var pkProperty = primaryKey.Properties[0];
+        var pkClrProperty = entityType.GetProperty(pkProperty.Name)
+            ?? throw new InvalidOperationException($"Primary key property '{pkProperty.Name}' not found on entity type '{entityType.Name}'.");
+
+        // 处理自增主键：如果是自增且插入，需将主键设为默认值
+        bool isIdentity = pkProperty.ValueGenerated == Microsoft.EntityFrameworkCore.Metadata.ValueGenerated.OnAdd;
+        object? pkValue = pkClrProperty.GetValue(entity);
+        if (isIdentity && (pkValue == null || pkValue.Equals(Activator.CreateInstance(pkClrProperty.PropertyType))))
+        {
+            // 主键为自增且未赋值，插入时EF会自动生成，无需查重
+            pkClrProperty.SetValue(entity, Activator.CreateInstance(pkClrProperty.PropertyType));
+            pkValue = null;
+        }
+
+        // 4. 判断记录是否存在
+        object? existing = null;
+        if (pkValue != null)
+        {
+            existing = await dbContext.GetDbRecordByPrimaryKey(tableTypeName, pkValue);
+        }
+        var efTypeForNav = dbContext.Model.FindEntityType(entityType);
+        var navigationProps = efTypeForNav?.GetNavigations().ToList() ?? new List<Microsoft.EntityFrameworkCore.Metadata.INavigation>();
+        var navigationNames = navigationProps.Select(n => n.Name).ToHashSet();
+        if (existing == null)
+        {
+            // 插入：赋值所有非导航属性，递归插入集合导航属性（如子表）
+            foreach (var prop in entityType.GetProperties())
+            {
+                if (!prop.CanWrite) continue;
+                if (navigationNames.Contains(prop.Name)) continue;
+            }
+            // 处理集合导航属性（如 Children）
+            foreach (var nav in navigationProps)
+            {
+                var navProp = entityType.GetProperty(nav.Name);
+                if (navProp == null) continue;
+                var navValue = navProp.GetValue(entity);
+                if (navValue is System.Collections.IEnumerable children && navProp.PropertyType != typeof(string))
+                {
+                    foreach (var child in children)
+                    {
+                        // 设置外键
+                        var fk = nav.ForeignKey.Properties.FirstOrDefault();
+                        if (fk != null)
+                        {
+                            var childType = child.GetType();
+                            var fkProp = childType.GetProperty(fk.Name);
+                            if (fkProp != null)
+                            {
+                                fkProp.SetValue(child, pkClrProperty.GetValue(entity));
+                            }
+                        }
+                        dbContext.Add(child);
+                    }
+                }
+            }
+            dbContext.Add(entity);
+        }
+        else
+        {
+            // 更新：赋值所有非导航属性，递归更新集合导航属性
+            foreach (var prop in entityType.GetProperties())
+            {
+                if (!prop.CanWrite) continue;
+                if (navigationNames.Contains(prop.Name)) continue;
+                var value = prop.GetValue(entity);
+                prop.SetValue(existing, value);
+            }
+            // 处理集合导航属性（如 Children）
+            foreach (var nav in navigationProps)
+            {
+                var navProp = entityType.GetProperty(nav.Name);
+                if (navProp == null) continue;
+                var newChildren = navProp.GetValue(entity) as System.Collections.IEnumerable;
+                var existingChildren = navProp.GetValue(existing) as System.Collections.IEnumerable;
+                if (newChildren == null || navProp.PropertyType == typeof(string)) continue;
+
+                // Convert to list for easier handling
+                var newList = newChildren.Cast<object>().ToList();
+                var existList = existingChildren?.Cast<object>().ToList() ?? new List<object>();
+                // Assume single PK for child
+                var childType = navProp.PropertyType.GenericTypeArguments.FirstOrDefault() ?? navProp.PropertyType.GetElementType();
+                if (childType == null) continue;
+                var childPk = dbContext.Model.FindEntityType(childType)?.FindPrimaryKey()?.Properties.FirstOrDefault();
+                if (childPk == null) continue;
+                var childPkProp = childType.GetProperty(childPk.Name);
+                if (childPkProp == null) continue;
+
+                // Update or add children
+                foreach (var newChild in newList)
+                {
+                    var newChildPk = childPkProp.GetValue(newChild);
+                    var existChild = existList.FirstOrDefault(e => Equals(childPkProp.GetValue(e), newChildPk));
+                    if (existChild != null)
+                    {
+                        // Update existing child
+                        foreach (var cprop in childType.GetProperties())
+                        {
+                            if (!cprop.CanWrite) continue;
+                            var val = cprop.GetValue(newChild);
+                            cprop.SetValue(existChild, val);
+                        }
+                        dbContext.Update(existChild);
+                    }
+                    else
+                    {
+                        // Set FK
+                        var fk = nav.ForeignKey.Properties.FirstOrDefault();
+                        if (fk != null)
+                        {
+                            var fkProp = childType.GetProperty(fk.Name);
+                            if (fkProp != null)
+                                fkProp.SetValue(newChild, pkClrProperty.GetValue(existing));
+                        }
+                        dbContext.Add(newChild);
+                    }
+                }
+                // Remove children not in new list
+                foreach (var existChild in existList)
+                {
+                    var existChildPk = childPkProp.GetValue(existChild);
+                    if (!newList.Any(nc => Equals(childPkProp.GetValue(nc), existChildPk)))
+                    {
+                        dbContext.Remove(existChild);
+                    }
+                }
+            }
+            dbContext.Update(existing);
+        }
+
+        // 判断是否为 SoftDeleteBaseDbContext，优先调用带 userName 的 SaveChangesAsync
+        if (dbContext is Kimi.EFExtensions.SoftDeleteBaseDbContext softDeleteDbContext)
+        {
+            // 这里你可以传递 userName，若有需要可扩展参数
+            await softDeleteDbContext.SaveChangesAsync(byUser ?? "System");
+        }
+        else
+        {
+            await dbContext.SaveChangesAsync();
+        }
+        return existing ?? entity;
     }
 }
